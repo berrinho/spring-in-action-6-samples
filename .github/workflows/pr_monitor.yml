@@ -1,0 +1,126 @@
+name: Pull Request monitor
+
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  pr-monitor:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Check PR for Allure link and POM changes
+        id: pr-analysis
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = context.payload.pull_request.head.ref;
+            const encodedBranch = encodeURIComponent(branch);
+
+            //
+            // Allure comment
+            //
+            const allureResultsPath = '/allure-results/';
+            const prBody = context.payload.pull_request.body || '';
+
+            if (!prBody.includes(allureResultsPath)) {
+              const allureReportUrl =
+                `https://maven-sites.beta.openathens.net/sites/${repo}/featureBranches/${encodedBranch}${allureResultsPath}`;
+
+              const allureCommentBody =
+                `It looks like the PR description doesn't contain a link to the Allure report, so here it is:\n${allureReportUrl}`;
+
+              core.setOutput('allureCommentBody', allureCommentBody);
+            }
+
+            //
+            // POM change comment
+            //
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner,
+                repo,
+                pull_number: context.payload.pull_request.number
+              }
+            );
+
+            const pomFiles = files.filter(file =>
+              file.filename.endsWith('pom.xml')
+            );
+
+            if (pomFiles.length > 0) {
+              const siteRoot =
+                `https://maven-sites.beta.openathens.net/sites/${repo}/featureBranches/${encodedBranch}`;
+
+              let pomCommentBody =
+                "It looks like the PR contains POM changes, so here's some links to some relevant generated reports:\n\n";
+
+              for (const pomFile of pomFiles) {
+                let moduleName;
+
+                if (pomFile.filename === 'pom.xml') {
+                  moduleName = repo;
+                } else {
+                  moduleName = pomFile.filename.replace('/pom.xml', '');
+                }
+
+                const dependencyGraphUrl =
+                  `${siteRoot}/${moduleName}/custom-reports/other/dependency-graph.html`;
+
+                const dependencyListUrl =
+                  `${siteRoot}/${moduleName}/dependencies.html`;
+
+                const snykReportUrl =
+                  `${siteRoot}/${moduleName}/dependency-scan-results.html`;
+
+                pomCommentBody += [
+                  `# ${moduleName}`,
+                  `- ${dependencyGraphUrl} | ${dependencyListUrl}`,
+                  `- ${snykReportUrl}`,
+                  ''
+                ].join('\n');
+              }
+
+              core.setOutput('pomCommentBody', pomCommentBody);
+            }
+
+      - name: Post Allure comment
+        if: ${{ steps.pr-analysis.outputs.allureCommentBody }}
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ steps.pr-analysis.outputs.allureCommentBody }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: context.issue.number,
+              body: process.env.COMMENT_BODY
+            });
+
+      - name: Post POM report comment
+        if: ${{ steps.pr-analysis.outputs.pomCommentBody }}
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ steps.pr-analysis.outputs.pomCommentBody }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: context.issue.number,
+              body: process.env.COMMENT_BODY
+            });
